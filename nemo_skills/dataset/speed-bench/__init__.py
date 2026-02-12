@@ -12,4 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# settings that define how evaluation should be done by default (all can be changed from cmdline)
 DATASET_GROUP = "speculative-decoding"
+METRICS_TYPE = "specdec"
+EVAL_SPLIT = "qualitative"
+GENERATION_ARGS = "++prompt_config=generic/default ++eval_type=specdec"
+GENERATION_MODULE = "nemo_skills.inference.eval.specdec"
