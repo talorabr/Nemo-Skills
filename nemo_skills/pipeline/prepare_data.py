@@ -40,6 +40,7 @@ DATASETS_REQUIRE_DATA_DIR = [
     "asr-leaderboard",
     "musan",
     "mmmu-pro",
+    "speed-bench",
 ]
 
 
