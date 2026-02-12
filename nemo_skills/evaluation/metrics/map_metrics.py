@@ -86,6 +86,7 @@ METRICS_MAP = {
     "omniscience": OmniMetrics,
     "compute-eval": ComputeEvalMetrics,
     "gradingbench": GradingBenchMetrics,
+    "specdec": SpecdecMetrics,
     "critpt": CritPtMetrics,
     "specdec": SpecdecMetrics,
 }
