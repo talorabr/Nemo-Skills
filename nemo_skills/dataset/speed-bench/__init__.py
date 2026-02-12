@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,41 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-*.json
-!greptile.json
-*.tar.gz
-*.tar
-*.npy
-*.info
-*.jsonl
-*.csv
-*.parquet
-nemo_experiments
-wandb
-build
-.hypothesis
-*.zip
-*.egg-info
-*.xml
-*.DS_Store
-.coverage
-.venv
-*.lock
-
-__pycache__
-.ipynb_checkpoints
-
-cluster_configs/*
-!cluster_configs/example-*.yaml
-
-nemo_skills/dataset/ruler/*/
-nemo_skills/dataset/bfcl_v3/*/
-nemo_skills/dataset/bfcl_v4/*/
-nemo_skills/dataset/aalcr/lcr/
-.idea/
-.idea/*
-CLAUDE.md
-AGENTS.md
-.codex
-
-.idea
+DATASET_GROUP = "speculative-decoding"
