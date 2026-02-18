@@ -16,5 +16,5 @@
 DATASET_GROUP = "speculative-decoding"
 METRICS_TYPE = "specdec"
 EVAL_SPLIT = "qualitative"
-GENERATION_ARGS = "++prompt_config=generic/default ++eval_type=specdec"
+GENERATION_ARGS = "++prompt_config=generic/default ++eval_type=specdec ++max_concurrent_requests=32"
 GENERATION_MODULE = "nemo_skills.inference.eval.specdec"
