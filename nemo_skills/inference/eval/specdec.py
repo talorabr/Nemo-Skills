@@ -19,8 +19,7 @@ import logging
 import os
 import shutil
 import sys
-from copy import deepcopy
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -602,48 +601,6 @@ class SpecdecGenerationTask(GenerationTask):
 
         return specdec_server_command
 
-    def fill_prompt(self, data_point, data):
-        """Map SPEED-Bench ``turns`` field to ``question`` for prompt filling.
-
-        SPEED-Bench data uses a ``turns`` list (following MT-bench format),
-        but the generic/default prompt config expects a ``{question}`` field.
-        This method copies the first turn into ``question`` before delegating
-        to the parent implementation.  For multi-turn data points, use
-        :meth:`fill_prompt_for_turn` instead.
-        """
-        data_point = deepcopy(data_point)
-        if "question" not in data_point and "turns" in data_point:
-            turns = data_point["turns"]
-            if isinstance(turns, list) and len(turns) > 0:
-                data_point["question"] = turns[0]
-            else:
-                data_point["question"] = str(turns)
-        return super().fill_prompt(data_point, data)
-
-    def fill_prompt_for_turn(self, data_point, data, turn_idx, conversation):
-        """Build the prompt for a specific turn of a multi-turn conversation.
-
-        For turn 0, this delegates to :meth:`fill_prompt`.  For subsequent
-        turns, it appends the assistant response from the previous turn and
-        the new user turn to the existing conversation.
-
-        Args:
-            data_point: The original data point dictionary.
-            data: Full dataset (passed through to parent).
-            turn_idx: The 0-based turn index.
-            conversation: The accumulated conversation (list of message dicts).
-
-        Returns:
-            The updated conversation as a list of message dicts.
-        """
-        turns = data_point["turns"]
-        if turn_idx == 0:
-            return self.fill_prompt(data_point, data)
-        # Append the new user turn to the existing conversation
-        conversation = list(conversation)
-        conversation.append({"role": "user", "content": turns[turn_idx]})
-        return conversation
-
     async def process_single_datapoint(self, data_point, all_data):
         """Handle single-turn and multi-turn generation.
 
@@ -655,111 +612,24 @@ class SpecdecGenerationTask(GenerationTask):
 
         Also tracks request IDs for SGLang metrics matching.
         """
-        server_type = self.cfg.server["server_type"]
-        is_sglang = server_type == "sglang"
 
-        turns = data_point["turns"]
-        is_multiturn = data_point["multiturn"] and len(turns) > 1
+        messages = []
+        responses = []
 
-        if not is_multiturn:
-            # For SGLang, we need include_response to extract request ID
-            # For VLLM, use the base implementation
-            if is_sglang:
-                # Replicate base class logic but with include_response=True
-                if is_dataclass(self.cfg.inference):
-                    inference_params = asdict(self.cfg.inference)
-                else:
-                    inference_params = dict(self.cfg.inference)
-                inference_params["include_response"] = True
-
-                generation_params = {
-                    **inference_params,
-                    **self.extra_generate_params,
-                    "prompt": self.fill_prompt(data_point, all_data),
-                    "stop_phrases": [self.cfg.stop_phrase] if self.cfg.stop_phrase else None,
-                }
-
-                result = await self.generate_with_semaphore(**generation_params)
-
-                # Handle count_prompt_tokens (same as base class)
-                if self.cfg.count_prompt_tokens:
-                    from nemo_skills.prompt.utils import get_token_count
-                    num_input_tokens = get_token_count(self.hf_tokenizer, generation_params["prompt"])
-                    result["num_input_tokens"] = num_input_tokens
-
-                # Extract request ID for SGLang, then remove response object (not JSON serializable)
-                if "response" in result:
-                    try:
-                        response_obj = result["response"]
-                        # OpenAI API response objects have .id attribute
-                        req_id = getattr(response_obj, "id", None)
-                        if req_id:
-                            self._request_ids.append(req_id)
-                            LOG.debug("Captured SGLang request ID: %s", req_id)
-                    except Exception as exc:
-                        LOG.warning("Failed to extract request ID from response: %s", exc)
-                    finally:
-                        # Remove response object to avoid JSON serialization errors
-                        result.pop("response", None)
-
-                return result
-            else:
-                return await super().process_single_datapoint(data_point, all_data)
-
-        # --- Multi-turn generation ---
-        if is_dataclass(self.cfg.inference):
-            inference_params = asdict(self.cfg.inference)
-        else:
-            inference_params = dict(self.cfg.inference)
-
-        # For SGLang, include response to extract request IDs
-        if is_sglang:
-            inference_params["include_response"] = True
-
-        conversation = None
-        total_generated_tokens = 0
-        all_generations = []
-
-        for turn_idx in range(len(turns)):
-            conversation = self.fill_prompt_for_turn(data_point, all_data, turn_idx, conversation)
-
-            generation_params = {
-                **inference_params,
-                **self.extra_generate_params,
-                "prompt": conversation,
-                "stop_phrases": [self.cfg.stop_phrase] if self.cfg.stop_phrase else None,
-            }
-
-            result = await self.generate_with_semaphore(**generation_params)
-            generation_text = result["generation"]
-            num_tokens = result["num_generated_tokens"]
-
-            # Extract request ID for SGLang, then remove response object (not JSON serializable)
-            if is_sglang and "response" in result:
-                try:
-                    response_obj = result["response"]
-                    # OpenAI API response objects have .id attribute
-                    req_id = getattr(response_obj, "id", None)
-                    if req_id:
-                        self._request_ids.append(req_id)
-                        LOG.debug("Captured SGLang request ID: %s", req_id)
-                except Exception as exc:
-                    LOG.warning("Failed to extract request ID from response: %s", exc)
-                finally:
-                    # Remove response object to avoid JSON serialization errors
-                    result.pop("response", None)
-
-            all_generations.append(generation_text)
-            total_generated_tokens += num_tokens
-
-            # Append assistant response to the conversation for the next turn
-            conversation = list(conversation)
-            conversation.append({"role": "assistant", "content": generation_text})
+        for turn in data_point["turns"]:
+            messages.append({"role": "user", "content": turn})
+            current_response = await super().process_single_datapoint(messages, all_data)
+            if "response" in current_response:
+                raw_response = current_response.pop("response")
+                current_response["response_id"] = raw_response.id
+            responses.append(current_response)
+            messages.append({"role": "assistant", "content": current_response["generation"]})
 
         # Return aggregated results
         return {
-            "generation": all_generations,
-            "num_generated_tokens": total_generated_tokens,
+            "generation": [response["generation"] for response in responses],
+            "num_generated_tokens": sum([response["num_generated_tokens"] for response in responses]),
+            "response_ids": [response["response_id"] for response in responses],
         }
 
     def _get_server_base_address(self) -> str:
