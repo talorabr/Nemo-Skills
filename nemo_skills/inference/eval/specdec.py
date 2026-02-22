@@ -17,6 +17,7 @@ import glob
 import json
 import logging
 import os
+import shutil
 import sys
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -29,7 +30,6 @@ import requests
 from nemo_skills.inference.generate import (
     GenerationTask,
     GenerationTaskConfig,
-    InferenceConfig,
 )
 from nemo_skills.inference.model import server_params
 from nemo_skills.utils import get_help_message, get_logger_name, nested_dataclass, setup_logging
@@ -104,7 +104,7 @@ def fetch_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics | None:
                                 end = line.index('"', start)
                                 pos = int(line[start:end])
                                 val = int(float(parts[-1]))
-                                accepted_per_pos[pos] = accepted_per_pos.get(pos, 0) + val
+                                accepted_per_pos[pos] += val
                         elif "num_accepted_tokens" in line:
                             num_accepted_tokens += int(float(parts[-1]))
 
@@ -168,14 +168,14 @@ def read_sglang_metrics_file(
                     entry = json.loads(line)
                     # If request_ids is None, accept all entries
                     if request_ids is not None:
-                        req_id = entry.get("id")
+                        req_id = entry["id"]
                         if req_id not in request_ids:
                             continue
                     matching_entries.append(entry)
                     # SGLang uses spec_verify_ct as the draft count
-                    total_drafts += entry.get("spec_verify_ct", 0)
-                    total_draft_tokens += entry.get("spec_draft_token_num", 0)
-                    total_accepted_tokens += entry.get("spec_accept_token_num", 0)
+                    total_drafts += entry["spec_verify_ct"]
+                    total_draft_tokens += entry["spec_draft_token_num"]
+                    total_accepted_tokens += entry["spec_accept_token_num"]
                 except json.JSONDecodeError:
                     LOG.warning("Skipping malformed JSON line in metrics file: %s", line[:100])
                     continue
@@ -361,8 +361,8 @@ def compute_sglang_spec_decode_delta(
     ``num_requests_total`` and ``generation_tokens_total`` **counters** we can
     back out the benchmark-specific averages::
 
-        weighted_al_after  = al_after  × n_after
-        weighted_al_before = al_before × n_before
+        weighted_al_after  = al_after  x n_after
+        weighted_al_before = al_before x n_before
         benchmark_al = (weighted_al_after - weighted_al_before)
                        / (n_after - n_before)
 
@@ -463,8 +463,8 @@ def compute_spec_decode_delta(
             set(before.accepted_per_pos.keys()) | set(after.accepted_per_pos.keys())
         )
         for pos in positions:
-            before_val = before.accepted_per_pos.get(pos, 0)
-            after_val = after.accepted_per_pos.get(pos, before_val)
+            before_val = before.accepted_per_pos[pos]
+            after_val = after.accepted_per_pos[pos]
             delta_pos = after_val - before_val
             per_pos_rates.append(delta_pos / delta_drafts)
 
@@ -506,17 +506,16 @@ class SpecdecGenerationConfig(GenerationTaskConfig):
     ``python -m nemo_skills.inference.generate --help``
     """
 
-    # Inheritance was converting these dataclasses to dicts, so to be on the safe side we override them
-    inference: InferenceConfig = field(default_factory=InferenceConfig)  # LLM call parameters
-    # Inference server configuration {server_params}
-    server: dict = field(default_factory=dict)
-
     # Directory to write SGLang metrics to.  If not specified, will use a
     # temporary directory created at launch.  This is the only reliable way
     # to share the tempdir between the pipeline process (which builds the
     # server command) and this generation worker process.
     metrics_file_dir: str | None = None
+    max_concurrent_requests: int = 32
 
+    def _post_init_validate_server(self):
+        super()._post_init_validate_server()
+        assert self.server["server_type"] in ["sglang", "vllm"], f"server_type must be either 'sglang' or 'vllm' for specdec generation, got '{self.server['server_type']}'"
 
 cs = hydra.core.config_store.ConfigStore.instance()
 cs.store(name="base_specdec_generation_config", node=SpecdecGenerationConfig)
@@ -532,6 +531,12 @@ class SpecdecGenerationTask(GenerationTask):
     """
 
     _sglang_metrics_dir: str | None = None
+
+    def __init__(self, cfg: SpecdecGenerationConfig):
+        super().__init__(cfg)
+        self._before_spec_metrics: SpecDecodeMetrics | None = None
+        self._before_sglang_metrics: SglangSpecDecodeMetrics | None = None
+        self._request_ids: list[str] = []  # Track request IDs for SGLang metrics matching
 
     @classmethod
     def _ensure_sglang_metrics_dir(cls) -> str:
@@ -597,12 +602,6 @@ class SpecdecGenerationTask(GenerationTask):
 
         return specdec_server_command
 
-    def __init__(self, cfg: SpecdecGenerationConfig):
-        super().__init__(cfg)
-        self._before_spec_metrics: SpecDecodeMetrics | None = None
-        self._before_sglang_metrics: SglangSpecDecodeMetrics | None = None
-        self._request_ids: list[str] = []  # Track request IDs for SGLang metrics matching
-
     def fill_prompt(self, data_point, data):
         """Map SPEED-Bench ``turns`` field to ``question`` for prompt filling.
 
@@ -637,7 +636,7 @@ class SpecdecGenerationTask(GenerationTask):
         Returns:
             The updated conversation as a list of message dicts.
         """
-        turns = data_point.get("turns", [])
+        turns = data_point["turns"]
         if turn_idx == 0:
             return self.fill_prompt(data_point, data)
         # Append the new user turn to the existing conversation
@@ -656,11 +655,11 @@ class SpecdecGenerationTask(GenerationTask):
 
         Also tracks request IDs for SGLang metrics matching.
         """
-        server_type = dict(self.cfg.server).get("server_type", "vllm")
+        server_type = self.cfg.server["server_type"]
         is_sglang = server_type == "sglang"
 
-        turns = data_point.get("turns", [])
-        is_multiturn = data_point.get("multiturn", False) and len(turns) > 1
+        turns = data_point["turns"]
+        is_multiturn = data_point["multiturn"] and len(turns) > 1
 
         if not is_multiturn:
             # For SGLang, we need include_response to extract request ID
@@ -679,16 +678,6 @@ class SpecdecGenerationTask(GenerationTask):
                     "prompt": self.fill_prompt(data_point, all_data),
                     "stop_phrases": [self.cfg.stop_phrase] if self.cfg.stop_phrase else None,
                 }
-
-                # Handle structured_output (same as base class)
-                if self.cfg.structured_output is not None:
-                    from nemo_skills.inference.generate import STRUCTURED_OUTPUTS
-                    generation_params["response_format"] = STRUCTURED_OUTPUTS[self.cfg.structured_output]
-
-                # Handle code_execution (same as base class)
-                if self.cfg.code_execution:
-                    if self.cfg.override_max_code_executions and self.cfg.total_code_executions_in_prompt is not None:
-                        generation_params["max_code_executions"] = data_point["total_code_executions"]
 
                 result = await self.generate_with_semaphore(**generation_params)
 
@@ -742,8 +731,8 @@ class SpecdecGenerationTask(GenerationTask):
             }
 
             result = await self.generate_with_semaphore(**generation_params)
-            generation_text = result.get("generation", "")
-            num_tokens = result.get("num_generated_tokens", 0)
+            generation_text = result["generation"]
+            num_tokens = result["num_generated_tokens"]
 
             # Extract request ID for SGLang, then remove response object (not JSON serializable)
             if is_sglang and "response" in result:
@@ -779,13 +768,9 @@ class SpecdecGenerationTask(GenerationTask):
         Returns:
             Server base address string, e.g. ``http://127.0.0.1:5000``.
         """
-        server_cfg = dict(self.cfg.server)
-        base_url = server_cfg.get("base_url")
-        if base_url:
-            # Strip the /v1 suffix if present to get the root address
-            return base_url.rstrip("/").removesuffix("/v1")
-        host = server_cfg.get("host", "127.0.0.1")
-        port = server_cfg.get("port", "5000")
+        server_cfg = self.cfg.server
+        host = server_cfg["host"]
+        port = server_cfg["port"]
         return f"http://{host}:{port}"
 
     def wait_for_server(self):
@@ -802,7 +787,7 @@ class SpecdecGenerationTask(GenerationTask):
         generation, it takes priority over the Prometheus delta.
         """
         super().wait_for_server()
-        server_type = dict(self.cfg.server).get("server_type", "vllm")
+        server_type = self.cfg.server["server_type"]
         base_url = self._get_server_base_address()
 
         if server_type == "sglang":
@@ -861,7 +846,7 @@ class SpecdecGenerationTask(GenerationTask):
         in the output JSONL.
         """
         server_address = self._get_server_base_address()
-        server_type = dict(self.cfg.server).get("server_type", "vllm")
+        server_type = self.cfg.server["server_type"]
 
         specdec_stats: dict[str, Any] | None = None
 
@@ -936,10 +921,25 @@ class SpecdecGenerationTask(GenerationTask):
                 )
 
         # Inject into eval_config for the evaluator
-        self.cfg.eval_config["server_address"] = server_address
-        self.cfg.eval_config["server_type"] = server_type
         self.cfg.eval_config["specdec_stats"] = specdec_stats
 
+        # ----- Copy SGLang metrics file to output directory -----
+        if server_type == "sglang" and specdec_stats is not None:
+            output_metrics_dir = Path(self.cfg.output_file).parent / "sglang-metrics"
+            output_metrics_dir.mkdir(parents=True, exist_ok=True)
+            metrics_dir = getattr(self.cfg, "metrics_file_dir", None)
+            if metrics_dir:
+                metrics_file = find_sglang_metrics_file(metrics_dir)
+                if metrics_file:
+                    dest = output_metrics_dir / Path(metrics_file).name
+                    shutil.copy2(metrics_file, dest)
+                    LOG.info("Copied SGLang metrics file to %s", dest)
+            # Also write the computed stats as JSON for easy consumption
+            stats_file = output_metrics_dir / "specdec_stats.json"
+            with open(stats_file, "w", encoding="utf-8") as f:
+                json.dump(specdec_stats, f, indent=2)
+            LOG.info("Wrote specdec stats to %s", stats_file)
+            
         super().run_batch_evaluation()
 
 

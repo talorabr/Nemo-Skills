@@ -28,18 +28,12 @@ class SpecdecEvaluatorConfig(BaseEvaluatorConfig):
     """Config for the speculative-decoding evaluator.
 
     Attributes:
-        server_address: Base URL of the inference server
-            (e.g. ``http://127.0.0.1:5000``).  Injected automatically by
-            :class:`SpecdecGenerationTask`.
-        server_type: Server framework — ``"vllm"`` or ``"sglang"``.
         specdec_stats: Pre-computed speculative decoding delta statistics
             (acceptance_length, acceptance_rate, per_position_acceptance_rates,
             etc.).  Injected by :class:`SpecdecGenerationTask` after computing
             the before/after delta from the server's ``/metrics`` endpoint.
     """
 
-    server_address: str = "http://127.0.0.1:5000"
-    server_type: str = "vllm"
     specdec_stats: dict | None = None
 
 
