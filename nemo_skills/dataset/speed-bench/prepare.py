@@ -360,7 +360,7 @@ her fear and anger)."""
         "No motivation provided",
     )
     if motivation == "No motivation provided":
-        LOG.warning("no motivation provided for character", character)
+        LOG.warning("no motivation provided for character %s", character)
     other_character_profiles_str = "\n\n".join(
         [
             f"{character_name}: {character_profile}"
