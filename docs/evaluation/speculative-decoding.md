@@ -4,7 +4,7 @@ This section details how to evaluate speculative decoding (SD) benchmarks.
 SD has emerged as a leading technique for accelerating LLM inference. By allowing a smaller draft model to propose multiple future tokens that are verified in a single forward pass by a larger target model, SD can significantly increase system throughput.
 
 In all SD benchmarks we want to measure two qualitative metrics for draft accuracy/quality: acceptance length (AL), acceptance rate (AR).
-Other metric in this group is conditional acceptance rate (or per-position accetpance rate), which measures the acceptance rate in a given position conditioned that all previous tokens were accepted.
+Other metric in this group is conditional acceptance rate (or per-position acceptance rate), which measures the acceptance rate in a given position conditioned that all previous tokens were accepted.
 
 For more advanced evaluation of SD, including throughput and per-category metrics, please use the evaluation framework [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench).
 
