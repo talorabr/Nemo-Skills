@@ -137,6 +137,7 @@ def _get_external_dataset(dataset_name: str, config_name: str = "default"):
 def _generate_stackselect_prompt(question: str, answers: list[str], answer: str, num_tokens: int) -> str:
     random.seed(42)
     encoder = tiktoken.get_encoding("o200k_base")
+    # Original prompt as given in Ada-LEval paper: https://arxiv.org/pdf/2404.06480
     prompt = """
 You are an AI assistant. Your job is to find out the most helpful answer to a given question.
 Each time, you will be provided with a question and n answers to this question.
@@ -214,6 +215,7 @@ An: The reason why you do not choose this answer.
 
 @staticmethod
 def _generate_textsort_prompt(prompt: str) -> str:
+    # Original prompt as given in Ada-LEval paper: https://arxiv.org/pdf/2404.06480
     original_instruction = "\n    You are an AI assistant. Your job is to sort multiple book sections into the correct order.\n    Each time, you will be provided with 4 pieces of text.\n    These texts form a continuous part of a book, but are provided in random order.\n    You need to find the correct order and return the answer in a string.\n    For example, if you output [4, 1, 3, 2], that means the correct order is: Part 4 -> Part 1 -> Part 3 -> Part 2.\n    You will also be provided with the neighboring paragraphs before and after the 4 pieces of texts. \n\n    The case sample is shown below and you should give me the answer in the format exactly the same as the sample. \n\n    However, you should NOT focus on the content of sample answer. \n\n    Please do NOT output any extra content. \n    Sample Input (format only): \n\n    Before: XXX (Text before the continuous book part)\n\n\n    Part 1: XXX\n\n\n    Part 2: XXX\n\n\n    Part 3: XXX\n\n\n    Part 4: XXX\n\n\n    After: XXX (Text after the continuous book part)\n\n\n    Sample Output (format only): \n\n    Answer: [4, 1, 3, 2] \n\n\n\n"
 
     new_instruction = """
@@ -270,6 +272,7 @@ YYY
 @staticmethod
 def _generate_writing_prompt(contents: list[str]) -> str:
     content = "\n\n".join([f"START CONTENT {i + 1}\n\n{content}\n\nEND CONTENT" for i, content in enumerate(contents)])
+    # Inspired by the prompt used in BAMBOO paper: https://arxiv.org/pdf/2309.13345
     prompt = f"""
 I want you to act as a long dialogue completer.
 Given a long dialogue(s), your objectives are:
@@ -328,6 +331,7 @@ def _generate_chatrag_bench_prompt(external_dataset: "Dataset") -> str:
 @staticmethod
 def _generate_coser_prompt(external_dataset: "Dataset") -> str:
     rng = np.random.default_rng(seed=12347)
+    # Original prompt as given in CoSER paper: https://arxiv.org/pdf/2404.06480
     prompt = """You are {character} from {book_name}.
 ==={character}'s Profile===
 {character_profile}
@@ -381,6 +385,7 @@ def _generate_mmlu_pro_prompt(external_dataset: "Dataset", subject: str) -> str:
         options_str = "\n".join([f"({letter}) {option}" for letter, option in options])
         return f"Question: {question}\n\nOptions: {options_str}\n\n"
 
+    # Original prompt as given in MMLU-Pro paper: https://arxiv.org/pdf/2406.01574
     prompt = 'The following are multiple choice questions (with answers) about {subject}. Think step by step and then finish your answer with "the answer is (X)" where X is the correct letter choice.\n\n'
     first_question = prompt.format(subject=subject) + get_question_and_options(
         external_dataset["question"][0], external_dataset["options"][0]
