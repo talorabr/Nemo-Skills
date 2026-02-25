@@ -85,7 +85,8 @@ def eval_specdec(cfg: dict[str, Any]) -> None:
         )
         for sample in data:
             for key, value in stats.items():
-                sample[key] = value
+                if key not in sample:
+                    sample[key] = value
     else:
         LOG.warning(
             "No speculative decoding stats available. "

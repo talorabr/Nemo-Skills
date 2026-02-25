@@ -16,5 +16,5 @@
 DATASET_GROUP = "speculative-decoding"
 METRICS_TYPE = "specdec"
 EVAL_SPLIT = "qualitative"
-GENERATION_ARGS = "++prompt_config=generic/default ++prompt_format=openai ++eval_type=specdec ++inference.include_response=true"
+GENERATION_ARGS = "++prompt_format=openai ++eval_type=specdec ++inference.include_response=true"
 GENERATION_MODULE = "nemo_skills.inference.eval.specdec"

@@ -15,7 +15,7 @@
 import logging
 from collections import defaultdict
 
-from nemo_skills.evaluation.metrics.base import BaseMetrics, as_float, as_int
+from nemo_skills.evaluation.metrics.base import BaseMetrics, as_float, as_int, as_percentage
 from nemo_skills.utils import get_logger_name
 
 LOG = logging.getLogger(get_logger_name(__file__))
@@ -47,22 +47,51 @@ class SpecdecMetrics(BaseMetrics):
 
     def reset(self):
         super().reset()
-        # Aggregate speculative decoding metrics (from before/after delta)
-        self.acceptance_length: float | None = None
-        self.acceptance_rate: float | None = None
-        self.num_drafts: int | None = None
-        self.draft_tokens: int | None = None
-        self.accepted_tokens: int | None = None
-        self.per_position_acceptance_rates: list[float] | None = None
-
         # Per-category tracking
-        self.category_counts: dict[str, int] = defaultdict(int)
-        self.category_total_gen_tokens: dict[str, int] = defaultdict(int)
-        self.category_total_gen_time: dict[str, float] = defaultdict(float)
+        self.category_counts = defaultdict(int)
 
     def _get_score_dict(self, prediction: dict) -> dict[str, bool | int | float]:
-        """Return a dummy score dict — speculative decoding has no correctness metric."""
-        return {}
+        return {
+            "spec_draft_tokens": prediction.get("draft_tokens", 0),
+            "spec_accepted_tokens": prediction.get("accepted_tokens", 0),
+            "spec_num_drafts": prediction.get("num_drafts", 0),
+            "spec_acceptance_length": prediction.get("acceptance_length", 0.0),
+            "spec_acceptance_rate": prediction.get("acceptance_rate", 0.0),
+        }
+    
+    # def _compute_pass_at_k(
+    #     self, predictions: list[dict], predicted_answers: list[str] | None = None, eval_dict: dict | None = None
+    # ):
+    #     """
+    #     Get pass@k metrics for speculative decoding.
+
+    #     Args:
+    #         predictions (list): List of generated predictions.
+    #             Will call `_get_score_dict` to get specdec metrics per prediction.
+    #         predicted_answers (Optional[list]): List of the answers that will be used to compute no_answer metric.
+    #         eval_dict (Optional[dict]): Dictionary to store aggregated metrics.
+    #             By default will use self.eval_dict.
+    #     """
+    #     if eval_dict is None:
+    #         eval_dict = self.eval_dict
+    #     score_dicts = [self._get_score_dict(pred) for pred in predictions]
+
+    #     for score_method in score_dicts[0].keys():
+    #         scores_list = [correctness_dict[score_method] for correctness_dict in score_dicts]
+    #         self.all_scores[score_method].append(scores_list)
+
+    #         instance_pass_scores = []
+    #         instance_pass_avg_scores = []
+
+    #         for k in range(1, len(predictions) + 1):
+    #             instance_pass_score = max(scores_list[:k])
+    #             instance_pass_scores.append(instance_pass_score)
+    #             instance_pass_avg_scores.append(sum(scores_list[:k]) / k)
+        
+    #         eval_dict[f"pass@{k}"][score_method] = sum(instance_pass_scores) / len(instance_pass_scores)
+    #         eval_dict[f"pass@1[avg-of-{k}]"][score_method] = sum(instance_pass_avg_scores) / len(instance_pass_avg_scores)
+    #         eval_dict[f"pass@{k}[{predictions[0].get("category", "unknown")}]"][score_method] = sum(instance_pass_scores) / len(instance_pass_scores)
+    #         eval_dict[f"pass@1[avg-of-{k}][{predictions[0].get("category", "unknown")}]"] = sum(instance_pass_avg_scores) / len(instance_pass_avg_scores)
 
     def update(self, predictions: list[dict]) -> None:
         """Update the evaluation results with the current element.
@@ -73,26 +102,14 @@ class SpecdecMetrics(BaseMetrics):
                 stamped by the ``eval_specdec`` evaluator.
         """
         super().update(predictions)
-
-        # Capture aggregate server metrics from the first prediction
-        # (all data points carry the same server-level values from the delta)
-        pred = predictions[0]
-        if self.acceptance_length is None and pred.get("acceptance_length") is not None:
-            self.acceptance_length = pred["acceptance_length"]
-            self.acceptance_rate = pred.get("acceptance_rate")
-            self.num_drafts = pred.get("num_drafts")
-            self.draft_tokens = pred.get("draft_tokens")
-            self.accepted_tokens = pred.get("accepted_tokens")
-            self.per_position_acceptance_rates = pred.get("per_position_acceptance_rates")
+        self._compute_pass_at_k(
+            predictions=predictions, 
+            predicted_answers=[pred.get("generation", None) for pred in predictions]
+        )
 
         # Track per-category statistics
-        category = pred.get("category", "unknown")
+        category = predictions[0].get("category", "unknown")
         self.category_counts[category] += 1
-        for p in predictions:
-            gen_tokens = p.get("num_generated_tokens", 0)
-            gen_time = p.get("generation_time", 0.0)
-            self.category_total_gen_tokens[category] += gen_tokens
-            self.category_total_gen_time[category] += gen_time
 
     def get_metrics(self) -> dict:
         """Get all computed metrics including speculative decoding statistics.
@@ -102,54 +119,27 @@ class SpecdecMetrics(BaseMetrics):
         """
         metrics_dict = {}
 
-        # We use a single evaluation mode for specdec metrics
-        agg_mode = "specdec"
-        agg_dict: dict = {}
-        self.update_common_metrics(agg_dict)
-
-        # Server-level speculative decoding metrics (already computed as deltas)
-        if self.acceptance_length is not None:
-            agg_dict["acceptance_length"] = self.acceptance_length
-        if self.acceptance_rate is not None:
-            agg_dict["acceptance_rate"] = self.acceptance_rate  # already a percentage
-        if self.num_drafts is not None:
-            agg_dict["num_drafts"] = self.num_drafts
-        if self.draft_tokens is not None:
-            agg_dict["draft_tokens"] = self.draft_tokens
-        if self.accepted_tokens is not None:
-            agg_dict["accepted_tokens"] = self.accepted_tokens
-        if self.per_position_acceptance_rates:
-            agg_dict["per_position_acceptance_rates"] = self.per_position_acceptance_rates
-
-        metrics_dict[agg_mode] = agg_dict
-
-        # Per-category breakdown
-        if self.category_counts:
-            category_results: dict = {}
-            for category, count in sorted(self.category_counts.items()):
-                cat_metrics: dict = {"num_entries": count}
-                total_tokens = self.category_total_gen_tokens.get(category, 0)
-                total_time = self.category_total_gen_time.get(category, 0.0)
-                if count > 0:
-                    cat_metrics["avg_gen_tokens"] = total_tokens / count
-                if total_time > 0:
-                    cat_metrics["tokens_per_second"] = total_tokens / total_time
-                category_results[category] = cat_metrics
-
-            agg_dict["category_breakdown"] = category_results
+        for agg_mode, agg_metric_dict in self.eval_dict.items():
+            metrics_dict[agg_mode] = {}
+            self.update_common_metrics(metrics_dict[agg_mode])
+            for metric_key, metric_value in agg_metric_dict.items():
+                if metric_key.startswith("spec_"):
+                    metrics_dict[agg_mode][metric_key] = metric_value / self.total
+                else:
+                    metrics_dict[agg_mode][metric_key] = metric_value
+        self._add_std_metrics(metrics_dict)
 
         return metrics_dict
 
-    def evaluations_to_print(self) -> list[str]:
-        """Return which evaluation modes should be printed."""
-        return ["specdec"]
-
     def metrics_to_print(self) -> dict:
         """Control which metrics are displayed in the summary table."""
-        return {
+        metrics_to_print = {
             "num_entries": as_int,
             "avg_tokens": as_int,
             "gen_seconds": as_int,
-            "acceptance_length": as_float,
-            "acceptance_rate": as_float,
+            "spec_acceptance_length": as_float,
+            "spec_acceptance_rate": as_float,
         }
+        if self.compute_no_answer:
+            metrics_to_print["no_answer"] = as_percentage
+        return metrics_to_print

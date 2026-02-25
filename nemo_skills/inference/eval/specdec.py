@@ -48,6 +48,8 @@ class SpecDecodeMetrics:
     num_drafts: int = 0
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
+    accept_length: float = 0.0
+    accept_rate: float = 0.0
     accepted_per_pos: dict[int, int] = field(default_factory=dict)
 
 
@@ -119,106 +121,6 @@ def fetch_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics | None:
         )
     except requests.RequestException as exc:
         LOG.warning("Failed to fetch metrics from %s: %s", metrics_url, exc)
-        return None
-
-
-def read_sglang_metrics_file(
-    metrics_file_path: str,
-    request_ids: set[str] | None = None,
-) -> dict[str, Any] | None:
-    """Read SGLang metrics file and extract speculative decoding metrics.
-
-    SGLang writes per-request metrics as JSON lines when launched with
-    ``--export-metrics-to-file``.  Each line contains:
-
-    - ``id``: Request ID (matches the ``rid`` in request_parameters)
-    - ``spec_accept_length``: Acceptance length for this request
-    - ``spec_accept_rate``: Acceptance rate for this request
-    - ``spec_accept_token_num``: Number of accepted tokens
-    - ``spec_draft_token_num``: Number of draft tokens
-    - ``spec_verify_ct``: Number of verification steps (drafts)
-
-    Args:
-        metrics_file_path: Path to the SGLang metrics JSONL file.
-        request_ids: Optional set of request IDs to filter by.  If ``None``,
-            **all** entries in the file are aggregated (useful when the
-            server is dedicated to the benchmark).
-
-    Returns:
-        Dictionary with aggregated spec decode statistics, or ``None`` if no
-        matching requests were found or metrics are unavailable.
-    """
-    if not os.path.exists(metrics_file_path):
-        LOG.warning("SGLang metrics file not found: %s", metrics_file_path)
-        return None
-
-    matching_entries = []
-    total_drafts = 0
-    total_draft_tokens = 0
-    total_accepted_tokens = 0
-
-    try:
-        with open(metrics_file_path, "rt", encoding="utf-8") as fin:
-            for line in fin:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    # If request_ids is None, accept all entries
-                    if request_ids is not None:
-                        req_id = entry["id"]
-                        if req_id not in request_ids:
-                            continue
-                    matching_entries.append(entry)
-                    # SGLang uses spec_verify_ct as the draft count
-                    total_drafts += entry["spec_verify_ct"]
-                    total_draft_tokens += entry["spec_draft_token_num"]
-                    total_accepted_tokens += entry["spec_accept_token_num"]
-                except json.JSONDecodeError:
-                    LOG.warning("Skipping malformed JSON line in metrics file: %s", line[:100])
-                    continue
-
-        if not matching_entries:
-            filter_desc = f"matching {len(request_ids)} IDs" if request_ids else "in file"
-            LOG.warning("No entries found %s in SGLang metrics file.", filter_desc)
-            return None
-
-        if total_draft_tokens <= 0:
-            LOG.warning(
-                "No speculative decoding activity detected (total_draft_tokens=%d). "
-                "Metrics will be empty.",
-                total_draft_tokens,
-            )
-            return None
-
-        # Compute aggregate metrics
-        acceptance_rate = (total_accepted_tokens / total_draft_tokens) * 100 if total_draft_tokens > 0 else 0.0
-        acceptance_length = 1 + (total_accepted_tokens / total_drafts) if total_drafts > 0 else 0.0
-
-        per_pos_rates: list[float] = []  # SGLang does not expose per-position breakdown
-
-        LOG.info(
-            "SGLang metrics file: entries=%d, drafts=%d, draft_tokens=%d, "
-            "accepted=%d, acceptance_rate=%.2f%%, acceptance_length=%.4f",
-            len(matching_entries),
-            total_drafts,
-            total_draft_tokens,
-            total_accepted_tokens,
-            acceptance_rate,
-            acceptance_length,
-        )
-
-        return {
-            "num_drafts": total_drafts,
-            "draft_tokens": total_draft_tokens,
-            "accepted_tokens": total_accepted_tokens,
-            "acceptance_rate": acceptance_rate,
-            "acceptance_length": acceptance_length,
-            "per_position_acceptance_rates": per_pos_rates,
-        }
-    except Exception as exc:
-        LOG.warning("Failed to read SGLang metrics file %s: %s", metrics_file_path, exc)
         return None
 
 
@@ -535,8 +437,6 @@ class SpecdecGenerationTask(GenerationTask):
         super().__init__(cfg)
         self._before_spec_metrics: SpecDecodeMetrics | None = None
         self._before_sglang_metrics: SglangSpecDecodeMetrics | None = None
-        self._request_ids: list[str] = []  # Track request IDs for SGLang metrics matching
-
     @classmethod
     def _ensure_sglang_metrics_dir(cls) -> str:
         """Return (and lazily create) a unique temp directory for SGLang metrics."""
@@ -600,8 +500,91 @@ class SpecdecGenerationTask(GenerationTask):
             )
 
         return specdec_server_command
+    
+    def inject_sglang_metrics(
+        self,
+        metrics_file_path: str,
+    ) -> dict[str, Any] | None:
+        """Inject SGLang metrics into the generation output.
 
-    async def process_single_datapoint(self, data_point, all_data):
+        SGLang writes per-request metrics as JSON lines when launched with
+        ``--export-metrics-to-file``.  Each line contains:
+
+        - ``id``: Request ID (matches the ``rid`` in request_parameters)
+        - ``spec_accept_length``: Acceptance length for this request
+        - ``spec_accept_rate``: Acceptance rate for this request
+        - ``spec_accept_token_num``: Number of accepted tokens
+        - ``spec_draft_token_num``: Number of draft tokens
+        - ``spec_verify_ct``: Number of verification steps (drafts)
+
+        Args:
+            metrics_file_path: Path to the SGLang metrics JSONL file.
+            request_ids: Optional set of request IDs to filter by.  If ``None``,
+                **all** entries in the file are aggregated (useful when the
+                server is dedicated to the benchmark).
+
+        Returns:
+            Dictionary with aggregated spec decode statistics, or ``None`` if no
+            matching requests were found or metrics are unavailable.
+        """
+        if not os.path.exists(metrics_file_path):
+            LOG.warning("SGLang metrics file not found: %s, skipping metrics injection", metrics_file_path)
+            return None
+
+        metrics: dict[str, Any] = {}
+        with open(metrics_file_path, "rt", encoding="utf-8") as fin:
+            for i, line in enumerate(fin):
+                try:
+                    metric = json.loads(line)
+                    metrics[metric["id"]] = {
+                        "acceptance_length": metric["spec_accept_length"],
+                        "acceptance_rate": metric["spec_accept_rate"] * 100,
+                        "accepted_tokens": metric["spec_accept_token_num"],
+                        "draft_tokens": metric["spec_draft_token_num"],
+                        "num_drafts": metric["spec_verify_ct"],
+                    }
+                except json.JSONDecodeError:
+                    LOG.warning(f"Failed to parse JSON line {i} for metrics injection, skipping")
+                    continue
+
+        data_points = []
+        with open(self.cfg.output_file, "rt", encoding="utf-8") as fin:
+            for i, line in enumerate(fin):
+                try: 
+                    data_points.append(json.loads(line))
+                except json.JSONDecodeError:
+                    LOG.warning(f"Failed to parse JSON line {i} for metrics injection, skipping")
+                    continue
+
+        with open(self.cfg.output_file, "wt", encoding="utf-8") as fout:
+            for data_point in data_points:
+                if all(response_id in metrics for response_id in data_point["response_ids"]):
+                    data_point.update({
+                        "num_drafts": sum(metrics[response_id]["num_drafts"] for response_id in data_point["response_ids"]),
+                        "draft_tokens": sum(metrics[response_id]["draft_tokens"] for response_id in data_point["response_ids"]),
+                        "accepted_tokens": sum(metrics[response_id]["accepted_tokens"] for response_id in data_point["response_ids"]),
+                        "acceptance_rate": sum(metrics[response_id]["acceptance_rate"] for response_id in data_point["response_ids"]) / len(data_point["response_ids"]),
+                        "acceptance_length": sum(metrics[response_id]["acceptance_length"] for response_id in data_point["response_ids"]) / len(data_point["response_ids"]),
+                    })
+                else:
+                    LOG.warning("No metrics found for response_ids: %s, skipping data point", data_point["response_ids"])
+                fout.write(json.dumps(data_point) + "\n")
+        
+        try:
+            return_value = {
+                "num_drafts": sum([data_point["num_drafts"] for data_point in data_points]),
+                "draft_tokens": sum([data_point["draft_tokens"] for data_point in data_points]),
+                "accepted_tokens": sum([data_point["accepted_tokens"] for data_point in data_points]),
+                "acceptance_rate": sum([data_point["acceptance_rate"] for data_point in data_points]) / len(data_points),
+                "acceptance_length": sum([data_point["acceptance_length"] for data_point in data_points]) / len(data_points),
+                "per_position_acceptance_rates": [],
+            }
+        except KeyError:
+            LOG.warning("Metrics injection failed for some data points, skipping")
+            return None
+        return return_value
+
+    async def process_single_datapoint(self, data_point, all_data, prompt_format="openai"):
         """Handle single-turn and multi-turn generation.
 
         For single-turn data points (or when ``multiturn`` is ``False``), this
@@ -616,9 +599,10 @@ class SpecdecGenerationTask(GenerationTask):
         messages = []
         responses = []
 
-        for turn in data_point["turns"]:
-            messages.append({"role": "user", "content": turn})
-            current_response = await super().process_single_datapoint(messages, all_data)
+        for message in data_point["messages"]:
+            messages.append(message)
+            new_data_point = {"messages": messages}
+            current_response = await super().process_single_datapoint(new_data_point, all_data, prompt_format=prompt_format)
             if "response" in current_response:
                 raw_response = current_response.pop("response")
                 current_response["response_id"] = raw_response.id
@@ -633,15 +617,12 @@ class SpecdecGenerationTask(GenerationTask):
         }
 
     def _get_server_base_address(self) -> str:
-        """Derive the server base address (without ``/v1``) from the config.
+        """Derive the server base address from the config.
 
         Returns:
             Server base address string, e.g. ``http://127.0.0.1:5000``.
         """
-        server_cfg = self.cfg.server
-        host = server_cfg["host"]
-        port = server_cfg["port"]
-        return f"http://{host}:{port}"
+        return self.cfg.server.get("base_url") or f"http://{self.cfg.server['host']}:{self.cfg.server['port']}"
 
     def wait_for_server(self):
         """Wait for the server, then snapshot speculative decoding counters.
@@ -726,12 +707,7 @@ class SpecdecGenerationTask(GenerationTask):
             if metrics_dir:
                 metrics_file = find_sglang_metrics_file(metrics_dir)
                 if metrics_file:
-                    if self._request_ids:
-                        request_ids_set = set(self._request_ids)
-                        specdec_stats = read_sglang_metrics_file(metrics_file, request_ids_set)
-                    else:
-                        # No request IDs tracked — read all entries
-                        specdec_stats = read_sglang_metrics_file(metrics_file, request_ids=None)
+                    specdec_stats = self.inject_sglang_metrics(metrics_file)
                 else:
                     LOG.warning("Could not find SGLang metrics file in %s", metrics_dir)
 
@@ -792,23 +768,6 @@ class SpecdecGenerationTask(GenerationTask):
 
         # Inject into eval_config for the evaluator
         self.cfg.eval_config["specdec_stats"] = specdec_stats
-
-        # ----- Copy SGLang metrics file to output directory -----
-        if server_type == "sglang" and specdec_stats is not None:
-            output_metrics_dir = Path(self.cfg.output_file).parent / "sglang-metrics"
-            output_metrics_dir.mkdir(parents=True, exist_ok=True)
-            metrics_dir = getattr(self.cfg, "metrics_file_dir", None)
-            if metrics_dir:
-                metrics_file = find_sglang_metrics_file(metrics_dir)
-                if metrics_file:
-                    dest = output_metrics_dir / Path(metrics_file).name
-                    shutil.copy2(metrics_file, dest)
-                    LOG.info("Copied SGLang metrics file to %s", dest)
-            # Also write the computed stats as JSON for easy consumption
-            stats_file = output_metrics_dir / "specdec_stats.json"
-            with open(stats_file, "w", encoding="utf-8") as f:
-                json.dump(specdec_stats, f, indent=2)
-            LOG.info("Wrote specdec stats to %s", stats_file)
             
         super().run_batch_evaluation()
 

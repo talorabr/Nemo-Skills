@@ -476,6 +476,7 @@ def prepare_data(args: argparse.Namespace) -> None:
 
         dataset = load_dataset("nvidia/SPEED-Bench", config, split="test")
         dataset = _resolve_external_data(dataset, config)
+        dataset = dataset.map(lambda example: {"messages": [{"role": "user", "content": turn} for turn in example["turns"]]}, remove_columns=["turns"])
         output_path = args.output_dir / f"{config}.jsonl"
         dataset.to_json(output_path)
         LOG.info(f"  -> Saved to {output_path}")
