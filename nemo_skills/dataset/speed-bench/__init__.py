@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # settings that define how evaluation should be done by default (all can be changed from cmdline)
+REQUIRES_DATA_DIR = True
 DATASET_GROUP = "speculative-decoding"
 METRICS_TYPE = "specdec"
 EVAL_SPLIT = "qualitative"

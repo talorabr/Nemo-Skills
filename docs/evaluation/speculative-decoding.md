@@ -46,7 +46,7 @@ Additional details are in [HuggingFace dataset repository](https://huggingface.c
 See example of data preparation command in [main evaluation docs](../evaluation/index.md#using-data-on-cluster).
 
 ```shell
-ns prepare_data speed-bench --data-dir=<output directory for data files>
+ns prepare_data speed-bench --data_dir=<output directory for data files> --cluster=<cluster config>
 ```
 
 Other supported options:
