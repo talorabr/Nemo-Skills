@@ -38,17 +38,10 @@ class SpecdecMetrics(BaseMetrics):
     * **per_position_acceptance_rates** — per-position acceptance probability,
       computed as ``delta_per_pos[i] / delta_drafts``.
 
-    The class also tracks per-category breakdowns using the ``category``
-    field present in SPEED-Bench data points.
     """
 
     def __init__(self):
         super().__init__(compute_no_answer=False)
-
-    def reset(self):
-        super().reset()
-        # Per-category tracking
-        self.category_counts = defaultdict(int)
 
     def _get_score_dict(self, prediction: dict) -> dict[str, bool | int | float]:
         return {
@@ -58,40 +51,6 @@ class SpecdecMetrics(BaseMetrics):
             "spec_acceptance_length": prediction.get("acceptance_length", 0.0),
             "spec_acceptance_rate": prediction.get("acceptance_rate", 0.0),
         }
-    
-    # def _compute_pass_at_k(
-    #     self, predictions: list[dict], predicted_answers: list[str] | None = None, eval_dict: dict | None = None
-    # ):
-    #     """
-    #     Get pass@k metrics for speculative decoding.
-
-    #     Args:
-    #         predictions (list): List of generated predictions.
-    #             Will call `_get_score_dict` to get specdec metrics per prediction.
-    #         predicted_answers (Optional[list]): List of the answers that will be used to compute no_answer metric.
-    #         eval_dict (Optional[dict]): Dictionary to store aggregated metrics.
-    #             By default will use self.eval_dict.
-    #     """
-    #     if eval_dict is None:
-    #         eval_dict = self.eval_dict
-    #     score_dicts = [self._get_score_dict(pred) for pred in predictions]
-
-    #     for score_method in score_dicts[0].keys():
-    #         scores_list = [correctness_dict[score_method] for correctness_dict in score_dicts]
-    #         self.all_scores[score_method].append(scores_list)
-
-    #         instance_pass_scores = []
-    #         instance_pass_avg_scores = []
-
-    #         for k in range(1, len(predictions) + 1):
-    #             instance_pass_score = max(scores_list[:k])
-    #             instance_pass_scores.append(instance_pass_score)
-    #             instance_pass_avg_scores.append(sum(scores_list[:k]) / k)
-        
-    #         eval_dict[f"pass@{k}"][score_method] = sum(instance_pass_scores) / len(instance_pass_scores)
-    #         eval_dict[f"pass@1[avg-of-{k}]"][score_method] = sum(instance_pass_avg_scores) / len(instance_pass_avg_scores)
-    #         eval_dict[f"pass@{k}[{predictions[0].get("category", "unknown")}]"][score_method] = sum(instance_pass_scores) / len(instance_pass_scores)
-    #         eval_dict[f"pass@1[avg-of-{k}][{predictions[0].get("category", "unknown")}]"] = sum(instance_pass_avg_scores) / len(instance_pass_avg_scores)
 
     def update(self, predictions: list[dict]) -> None:
         """Update the evaluation results with the current element.
@@ -106,10 +65,6 @@ class SpecdecMetrics(BaseMetrics):
             predictions=predictions, 
             predicted_answers=[pred.get("generation", None) for pred in predictions]
         )
-
-        # Track per-category statistics
-        category = predictions[0].get("category", "unknown")
-        self.category_counts[category] += 1
 
     def get_metrics(self) -> dict:
         """Get all computed metrics including speculative decoding statistics.

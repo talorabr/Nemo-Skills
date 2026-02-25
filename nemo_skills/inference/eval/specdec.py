@@ -36,24 +36,52 @@ from nemo_skills.utils import get_help_message, get_logger_name, nested_dataclas
 LOG = logging.getLogger(get_logger_name(__file__))
 
 
+class SpecDecodeMetricsError(Exception):
+    """Exception raised when fetching speculative decoding metrics fails."""
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+
 # ---------------------------------------------------------------------------
 # Speculative decoding metrics from the server's Prometheus endpoint
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class SpecDecodeMetrics:
-    """Raw speculative decoding counters scraped from the Prometheus endpoint."""
+    """Unified speculative decoding snapshot scraped from ``/metrics``."""
 
+    # VLLM counters
     num_drafts: int = 0
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
-    accept_length: float = 0.0
-    accept_rate: float = 0.0
     accepted_per_pos: dict[int, int] = field(default_factory=dict)
 
+    # SGLang gauges and counters
+    spec_accept_length: float = 0.0
+    spec_accept_rate: float = 0.0
+    num_requests: int = 0
+    generation_tokens: int = 0
 
-def fetch_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics | None:
+
+def _fetch_metrics_text(base_url: str) -> str | None:
+    """Fetch raw Prometheus text from ``/metrics`` endpoint."""
+    metrics_url = f"{base_url.rstrip('/')}/metrics"
+    try:
+        response = requests.get(metrics_url, timeout=30)
+        if response.status_code != 200:
+            LOG.warning("Metrics endpoint returned status %d", response.status_code)
+            return None
+        return response.text
+    except requests.RequestException as exc:
+        LOG.warning("Failed to fetch metrics from %s: %s", metrics_url, exc)
+        return None
+
+
+def fetch_vllm_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics:
     """Fetch speculative decoding metrics from the server's ``/metrics`` endpoint.
 
     Parses Prometheus text-format exposition looking for VLLM
@@ -63,65 +91,54 @@ def fetch_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics | None:
         base_url: Server root URL, e.g. ``http://127.0.0.1:5000``.
 
     Returns:
-        :class:`SpecDecodeMetrics` with the scraped counters, or ``None``
-        if speculative decoding metrics are not available.
+        :class:`SpecDecodeMetrics` with the scraped counters.
     """
-    metrics_url = f"{base_url.rstrip('/')}/metrics"
-    try:
-        response = requests.get(metrics_url, timeout=30)
-        if response.status_code != 200:
-            LOG.warning("Metrics endpoint returned status %d", response.status_code)
-            return None
-        text = response.text
+    text = _fetch_metrics_text(base_url)
+    if text is None:
+        message = "Failed to fetch metrics from the server"
+        LOG.error(message)
+        raise SpecDecodeMetricsError(message)
 
-        num_drafts = 0
-        num_draft_tokens = 0
-        num_accepted_tokens = 0
-        accepted_per_pos: dict[int, int] = {}
-        found_spec_decode = False
+    metrics = SpecDecodeMetrics()
+    found_spec_decode = False
+    pos_label = 'position="'
 
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith("vllm:spec_decode"):
+            continue
 
-            if line.startswith("vllm:spec_decode"):
-                found_spec_decode = True
-                # Skip Prometheus _created timestamp lines — they contain
-                # Unix timestamps, not actual counter values.
-                if "_created" in line:
-                    continue
-                parts = line.split()
-                if parts:
-                    with contextlib.suppress(ValueError):
-                        if "num_drafts" in line:
-                            num_drafts += int(float(parts[-1]))
-                        elif "num_draft_tokens" in line:
-                            num_draft_tokens += int(float(parts[-1]))
-                        elif "num_accepted_tokens_per_pos" in line:
-                            pos_label = 'position="'
-                            if pos_label in line:
-                                start = line.index(pos_label) + len(pos_label)
-                                end = line.index('"', start)
-                                pos = int(line[start:end])
-                                val = int(float(parts[-1]))
-                                accepted_per_pos[pos] += val
-                        elif "num_accepted_tokens" in line:
-                            num_accepted_tokens += int(float(parts[-1]))
+        found_spec_decode = True
+        if "_created" in line:
+            continue
 
-        if not found_spec_decode:
-            LOG.info("No vllm:spec_decode_* metrics found on the server (speculative decoding may not be enabled).")
-            return None
+        parts = line.split()
+        if not parts:
+            continue
 
-        return SpecDecodeMetrics(
-            num_drafts=num_drafts,
-            num_draft_tokens=num_draft_tokens,
-            num_accepted_tokens=num_accepted_tokens,
-            accepted_per_pos=accepted_per_pos,
-        )
-    except requests.RequestException as exc:
-        LOG.warning("Failed to fetch metrics from %s: %s", metrics_url, exc)
-        return None
+        with contextlib.suppress(ValueError):
+            metric_value = int(float(parts[-1]))
+            if "num_drafts" in line:
+                metrics.num_drafts += metric_value
+            elif "num_draft_tokens" in line:
+                metrics.num_draft_tokens += metric_value
+            elif "num_accepted_tokens_per_pos" in line:
+                if pos_label in line:
+                    start = line.index(pos_label) + len(pos_label)
+                    end = line.index('"', start)
+                    pos = int(line[start:end])
+                    metrics.accepted_per_pos[pos] = metrics.accepted_per_pos.get(pos, 0) + metric_value
+            elif "num_accepted_tokens" in line:
+                metrics.num_accepted_tokens += metric_value
+
+    if not found_spec_decode:
+        message = "No vllm:spec_decode_* metrics found on the server (speculative decoding may not be enabled)."
+        LOG.error(message)
+        raise SpecDecodeMetricsError(message)
+
+    return metrics
 
 
 def find_sglang_metrics_file(metrics_dir: str) -> str | None:
@@ -151,35 +168,7 @@ def find_sglang_metrics_file(metrics_dir: str) -> str | None:
     return latest_file
 
 
-# ---------------------------------------------------------------------------
-# SGLang Prometheus metrics (before/after delta on the /metrics endpoint)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SglangSpecDecodeMetrics:
-    """Snapshot of SGLang speculative decoding metrics from the Prometheus endpoint.
-
-    SGLang exposes two *gauge* metrics (instantaneous averages over the most
-    recent scheduler batch) and several *counter* metrics that monotonically
-    increase.  We capture both so we can reconstruct per-benchmark averages
-    using the counter deltas as weights.
-
-    Prometheus lines of interest (from ``/metrics``)::
-
-        sglang:spec_accept_length{…}   <float>   # gauge
-        sglang:spec_accept_rate{…}     <float>   # gauge
-        sglang:num_requests_total{…}   <float>   # counter
-        sglang:generation_tokens_total{…} <float> # counter
-    """
-
-    spec_accept_length: float = 0.0
-    spec_accept_rate: float = 0.0
-    num_requests: int = 0
-    generation_tokens: int = 0
-
-
-def fetch_sglang_spec_decode_metrics(base_url: str) -> SglangSpecDecodeMetrics | None:
+def fetch_sglang_spec_decode_metrics(base_url: str) -> SpecDecodeMetrics:
     """Fetch speculative decoding metrics from an SGLang server's ``/metrics`` endpoint.
 
     Parses Prometheus text-format exposition looking for ``sglang:spec_accept_*``
@@ -190,70 +179,86 @@ def fetch_sglang_spec_decode_metrics(base_url: str) -> SglangSpecDecodeMetrics |
         base_url: Server root URL, e.g. ``http://127.0.0.1:5000``.
 
     Returns:
-        :class:`SglangSpecDecodeMetrics` with the scraped values, or ``None``
-        if the metrics endpoint is unreachable or speculative decoding gauges
-        are absent.
+        :class:`SpecDecodeMetrics` with the scraped values.
     """
-    metrics_url = f"{base_url.rstrip('/')}/metrics"
-    try:
-        response = requests.get(metrics_url, timeout=30)
-        if response.status_code != 200:
-            LOG.warning("SGLang metrics endpoint returned status %d", response.status_code)
-            return None
-        text = response.text
+    text = _fetch_metrics_text(base_url)
+    if text is None:
+        message = "Failed to fetch metrics from the server"
+        LOG.error(message)
+        raise SpecDecodeMetricsError(message)
 
-        spec_accept_length = 0.0
-        spec_accept_rate = 0.0
-        num_requests = 0
-        generation_tokens = 0
-        found_spec = False
+    metrics = SpecDecodeMetrics()
+    found_spec = False
 
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
 
-            parts = line.split()
-            if len(parts) < 2:
-                continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
 
-            with contextlib.suppress(ValueError):
-                # Gauges – SGLang may emit these with labels; we accumulate
-                # across TP ranks (though typically only tp_rank=0 carries
-                # spec decode info).
-                if "sglang:spec_accept_length{" in line or line.startswith("sglang:spec_accept_length "):
-                    spec_accept_length = float(parts[-1])
-                    found_spec = True
-                elif "sglang:spec_accept_rate{" in line or line.startswith("sglang:spec_accept_rate "):
-                    spec_accept_rate = float(parts[-1])
-                    found_spec = True
-                # Counters
-                elif "sglang:num_requests_total{" in line or line.startswith("sglang:num_requests_total "):
-                    num_requests = int(float(parts[-1]))
-                elif "sglang:generation_tokens_total{" in line or line.startswith("sglang:generation_tokens_total "):
-                    generation_tokens = int(float(parts[-1]))
+        with contextlib.suppress(ValueError):
+            if "sglang:spec_accept_length{" in line or line.startswith("sglang:spec_accept_length "):
+                metrics.spec_accept_length = float(parts[-1])
+                found_spec = True
+            elif "sglang:spec_accept_rate{" in line or line.startswith("sglang:spec_accept_rate "):
+                metrics.spec_accept_rate = float(parts[-1])
+                found_spec = True
+            elif "sglang:num_requests_total{" in line or line.startswith("sglang:num_requests_total "):
+                metrics.num_requests = int(float(parts[-1]))
+            elif "sglang:generation_tokens_total{" in line or line.startswith("sglang:generation_tokens_total "):
+                metrics.generation_tokens = int(float(parts[-1]))
 
-        if not found_spec:
-            LOG.info(
-                "No sglang:spec_accept_* metrics found on the server "
-                "(speculative decoding may not be enabled)."
-            )
-            return None
+    if not found_spec:
+        message = "No sglang:spec_accept_* metrics found on the server (speculative decoding may not be enabled)."
+        LOG.error(message)
+        raise SpecDecodeMetricsError(message)
+    return metrics
 
-        return SglangSpecDecodeMetrics(
-            spec_accept_length=spec_accept_length,
-            spec_accept_rate=spec_accept_rate,
-            num_requests=num_requests,
-            generation_tokens=generation_tokens,
-        )
-    except requests.RequestException as exc:
-        LOG.warning("Failed to fetch SGLang metrics from %s: %s", metrics_url, exc)
+
+def _build_specdec_stats(
+    *,
+    num_drafts: int,
+    draft_tokens: int,
+    accepted_tokens: int,
+    acceptance_rate_fraction: float,
+    acceptance_length: float,
+    per_position_acceptance_rates: list[float] | None = None,
+) -> dict[str, Any]:
+    """Build a normalized spec-decode payload for evaluator injection."""
+    return {
+        "num_drafts": num_drafts,
+        "draft_tokens": draft_tokens,
+        "accepted_tokens": accepted_tokens,
+        "acceptance_rate": acceptance_rate_fraction * 100,
+        "acceptance_length": acceptance_length,
+        "per_position_acceptance_rates": per_position_acceptance_rates or [],
+    }
+
+
+def _compute_weighted_delta(
+    *,
+    before_avg: float,
+    after_avg: float,
+    before_count: int,
+    after_count: int,
+) -> float | None:
+    """Compute benchmark-only average from cumulative weighted averages."""
+    delta_count = after_count - before_count
+    if delta_count <= 0:
         return None
+    if before_count == 0:
+        return after_avg
+    weighted_after = after_avg * after_count
+    weighted_before = before_avg * before_count
+    return (weighted_after - weighted_before) / delta_count
 
 
 def compute_sglang_spec_decode_delta(
-    before: SglangSpecDecodeMetrics,
-    after: SglangSpecDecodeMetrics,
+    before: SpecDecodeMetrics,
+    after: SpecDecodeMetrics,
 ) -> dict[str, Any] | None:
     """Compute benchmark-specific acceptance metrics from two SGLang snapshots.
 
@@ -289,25 +294,21 @@ def compute_sglang_spec_decode_delta(
         )
         return None
 
-    # --- Acceptance length ---
-    if before.num_requests == 0:
-        # Fresh server — after values cover exactly our benchmark traffic.
-        acceptance_length = after.spec_accept_length
-    else:
-        # Weighted-average decomposition
-        weighted_after = after.spec_accept_length * after.num_requests
-        weighted_before = before.spec_accept_length * before.num_requests
-        acceptance_length = (weighted_after - weighted_before) / delta_requests
-
-    # --- Acceptance rate ---
-    if before.num_requests == 0:
-        acceptance_rate_fraction = after.spec_accept_rate
-    else:
-        weighted_after = after.spec_accept_rate * after.num_requests
-        weighted_before = before.spec_accept_rate * before.num_requests
-        acceptance_rate_fraction = (weighted_after - weighted_before) / delta_requests
-
-    acceptance_rate_pct = acceptance_rate_fraction * 100
+    acceptance_length = _compute_weighted_delta(
+        before_avg=before.spec_accept_length,
+        after_avg=after.spec_accept_length,
+        before_count=before.num_requests,
+        after_count=after.num_requests,
+    )
+    acceptance_rate_fraction = _compute_weighted_delta(
+        before_avg=before.spec_accept_rate,
+        after_avg=after.spec_accept_rate,
+        before_count=before.num_requests,
+        after_count=after.num_requests,
+    )
+    if acceptance_length is None or acceptance_rate_fraction is None:
+        LOG.warning("SGLang: failed to compute weighted delta from request counters.")
+        return None
 
     LOG.info(
         "SGLang Prometheus delta: requests=%d, gen_tokens=%d, "
@@ -315,20 +316,19 @@ def compute_sglang_spec_decode_delta(
         delta_requests,
         delta_gen_tokens,
         acceptance_length,
-        acceptance_rate_pct,
+        acceptance_rate_fraction * 100,
     )
 
-    return {
-        "num_drafts": delta_requests,  # one verify cycle per request as proxy
-        "draft_tokens": delta_gen_tokens,
-        "accepted_tokens": int(delta_gen_tokens * acceptance_rate_fraction) if delta_gen_tokens > 0 else 0,
-        "acceptance_rate": acceptance_rate_pct,
-        "acceptance_length": acceptance_length,
-        "per_position_acceptance_rates": [],  # SGLang does not expose per-position breakdown
-    }
+    return _build_specdec_stats(
+        num_drafts=delta_requests, 
+        draft_tokens=delta_gen_tokens,
+        accepted_tokens=int(delta_gen_tokens * acceptance_rate_fraction) if delta_gen_tokens > 0 else 0,
+        acceptance_rate_fraction=acceptance_rate_fraction,
+        acceptance_length=acceptance_length,
+    )
 
 
-def compute_spec_decode_delta(
+def compute_vllm_spec_decode_delta(
     before: SpecDecodeMetrics,
     after: SpecDecodeMetrics,
 ) -> dict[str, Any] | None:
@@ -364,8 +364,8 @@ def compute_spec_decode_delta(
             set(before.accepted_per_pos.keys()) | set(after.accepted_per_pos.keys())
         )
         for pos in positions:
-            before_val = before.accepted_per_pos[pos]
-            after_val = after.accepted_per_pos[pos]
+            before_val = before.accepted_per_pos.get(pos, 0)
+            after_val = after.accepted_per_pos.get(pos, 0)
             delta_pos = after_val - before_val
             per_pos_rates.append(delta_pos / delta_drafts)
 
@@ -377,17 +377,17 @@ def compute_spec_decode_delta(
         )
         return None
 
-    acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
+    acceptance_rate_fraction = delta_accepted / delta_draft_tokens
     acceptance_length = 1 + delta_accepted / delta_drafts if delta_drafts > 0 else 0.0
 
-    return {
-        "num_drafts": delta_drafts,
-        "draft_tokens": delta_draft_tokens,
-        "accepted_tokens": delta_accepted,
-        "acceptance_rate": acceptance_rate,
-        "acceptance_length": acceptance_length,
-        "per_position_acceptance_rates": per_pos_rates,
-    }
+    return _build_specdec_stats(
+        num_drafts=delta_drafts,
+        draft_tokens=delta_draft_tokens,
+        accepted_tokens=delta_accepted,
+        acceptance_rate_fraction=acceptance_rate_fraction,
+        acceptance_length=acceptance_length,
+        per_position_acceptance_rates=per_pos_rates,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,8 +435,8 @@ class SpecdecGenerationTask(GenerationTask):
 
     def __init__(self, cfg: SpecdecGenerationConfig):
         super().__init__(cfg)
-        self._before_spec_metrics: SpecDecodeMetrics | None = None
-        self._before_sglang_metrics: SglangSpecDecodeMetrics | None = None
+        self._before_metrics: SpecDecodeMetrics | None = None
+
     @classmethod
     def _ensure_sglang_metrics_dir(cls) -> str:
         """Return (and lazily create) a unique temp directory for SGLang metrics."""
@@ -644,36 +644,27 @@ class SpecdecGenerationTask(GenerationTask):
         if server_type == "sglang":
             # SGLang: Fetch "before" snapshot from Prometheus /metrics
             LOG.info("Fetching BEFORE SGLang spec-decode metrics from %s/metrics", base_url)
-            self._before_sglang_metrics = fetch_sglang_spec_decode_metrics(base_url)
-            if self._before_sglang_metrics is not None:
-                LOG.info(
-                    "SGLang before snapshot: accept_length=%.4f, accept_rate=%.4f, "
-                    "num_requests=%d, gen_tokens=%d",
-                    self._before_sglang_metrics.spec_accept_length,
-                    self._before_sglang_metrics.spec_accept_rate,
-                    self._before_sglang_metrics.num_requests,
-                    self._before_sglang_metrics.generation_tokens,
-                )
-            else:
-                LOG.info(
-                    "No SGLang spec-decode metrics found before generation "
-                    "(speculative decoding may not be enabled)."
-                )
+            self._before_metrics = fetch_sglang_spec_decode_metrics(base_url)
+            LOG.info(
+                "SGLang before snapshot: accept_length=%.4f, accept_rate=%.4f, "
+                "num_requests=%d, gen_tokens=%d",
+                self._before_metrics.spec_accept_length,
+                self._before_metrics.spec_accept_rate,
+                self._before_metrics.num_requests,
+                self._before_metrics.generation_tokens,
+            )
             return
 
         # VLLM: Fetch before snapshot
-        LOG.info("Fetching BEFORE spec-decode metrics from %s/metrics", base_url)
-        self._before_spec_metrics = fetch_spec_decode_metrics(base_url)
-        if self._before_spec_metrics is not None:
-            LOG.info(
-                "Before snapshot: drafts=%d, draft_tokens=%d, accepted=%d, per_pos_keys=%s",
-                self._before_spec_metrics.num_drafts,
-                self._before_spec_metrics.num_draft_tokens,
-                self._before_spec_metrics.num_accepted_tokens,
-                sorted(self._before_spec_metrics.accepted_per_pos.keys()),
-            )
-        else:
-            LOG.info("No spec-decode metrics found before generation (may not be enabled).")
+        LOG.info("Fetching BEFORE VLLM spec-decode metrics from %s/metrics", base_url)
+        self._before_metrics = fetch_vllm_spec_decode_metrics(base_url)
+        LOG.info(
+            "Before snapshot: drafts=%d, draft_tokens=%d, accepted=%d, per_pos_keys=%s",
+            self._before_metrics.num_drafts,
+            self._before_metrics.num_draft_tokens,
+            self._before_metrics.num_accepted_tokens,
+            sorted(self._before_metrics.accepted_per_pos.keys()),
+        )
 
     def run_batch_evaluation(self):
         """Fetch after-metrics, compute delta, then run the evaluator.
@@ -717,54 +708,34 @@ class SpecdecGenerationTask(GenerationTask):
                 LOG.info("Fetching AFTER SGLang spec-decode metrics from %s/metrics", server_address)
                 after_sglang = fetch_sglang_spec_decode_metrics(server_address)
 
-                if self._before_sglang_metrics is not None and after_sglang is not None:
-                    specdec_stats = compute_sglang_spec_decode_delta(
-                        self._before_sglang_metrics, after_sglang
-                    )
-                    if specdec_stats is not None:
-                        LOG.info(
-                            "SGLang Prometheus delta: acceptance_length=%.4f, "
-                            "acceptance_rate=%.2f%%, requests=%d, gen_tokens=%d",
-                            specdec_stats["acceptance_length"],
-                            specdec_stats["acceptance_rate"],
-                            specdec_stats["num_drafts"],
-                            specdec_stats["draft_tokens"],
-                        )
-                else:
-                    LOG.warning(
-                        "Could not compute SGLang Prometheus delta (before=%s, after=%s).",
-                        "available" if self._before_sglang_metrics else "missing",
-                        "available" if after_sglang else "missing",
-                    )
+                specdec_stats = compute_sglang_spec_decode_delta(
+                    self._before_metrics, after_sglang
+                )
+                LOG.info(
+                    "SGLang Prometheus delta: acceptance_length=%.4f, "
+                    "acceptance_rate=%.2f%%, requests=%d, gen_tokens=%d",
+                    specdec_stats["acceptance_length"],
+                    specdec_stats["acceptance_rate"],
+                    specdec_stats["num_drafts"],
+                    specdec_stats["draft_tokens"],
+                )
         else:
             # VLLM: Fetch "after" snapshot and compute delta
             LOG.info("Fetching AFTER spec-decode metrics from %s/metrics", server_address)
-            after_metrics = fetch_spec_decode_metrics(server_address)
+            after_metrics = fetch_vllm_spec_decode_metrics(server_address)
 
-            if self._before_spec_metrics is not None and after_metrics is not None:
-                specdec_stats = compute_spec_decode_delta(self._before_spec_metrics, after_metrics)
-                if specdec_stats is not None:
-                    LOG.info(
-                        "Spec-decode delta: drafts=%d, draft_tokens=%d, accepted=%d, "
-                        "acceptance_rate=%.2f%%, acceptance_length=%.4f",
-                        specdec_stats["num_drafts"],
-                        specdec_stats["draft_tokens"],
-                        specdec_stats["accepted_tokens"],
-                        specdec_stats["acceptance_rate"],
-                        specdec_stats["acceptance_length"],
-                    )
-                    if specdec_stats["per_position_acceptance_rates"]:
-                        LOG.info(
-                            "Per-position acceptance rates: %s",
-                            [f"{r:.4f}" for r in specdec_stats["per_position_acceptance_rates"]],
-                        )
-            else:
-                LOG.warning(
-                    "Could not compute spec-decode delta (before=%s, after=%s). "
-                    "Speculative decoding may not be enabled on the server.",
-                    "available" if self._before_spec_metrics else "missing",
-                    "available" if after_metrics else "missing",
-                )
+            specdec_stats = compute_vllm_spec_decode_delta(self._before_metrics, after_metrics)
+            LOG.info(
+                "Spec-decode delta: drafts=%d, draft_tokens=%d, accepted=%d, "
+                "acceptance_rate=%.2f%%, acceptance_length=%.4f",
+                specdec_stats["num_drafts"],
+                specdec_stats["draft_tokens"],
+                specdec_stats["accepted_tokens"],
+                specdec_stats["acceptance_rate"],
+                specdec_stats["acceptance_length"],
+            )
+            if specdec_stats["per_position_acceptance_rates"]:
+                LOG.info("Per-position acceptance rates: %s", [f"{r:.4f}" for r in specdec_stats["per_position_acceptance_rates"]])
 
         # Inject into eval_config for the evaluator
         self.cfg.eval_config["specdec_stats"] = specdec_stats
