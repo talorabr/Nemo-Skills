@@ -44,11 +44,11 @@ class SpecdecMetrics(BaseMetrics):
 
     def _get_score_dict(self, prediction: dict) -> dict[str, bool | int | float]:
         return {
-            "spec_draft_tokens": prediction.get("draft_tokens", 0),
-            "spec_accepted_tokens": prediction.get("accepted_tokens", 0),
-            "spec_num_drafts": prediction.get("num_drafts", 0),
-            "spec_acceptance_length": prediction.get("acceptance_length", 0.0),
-            "spec_acceptance_rate": prediction.get("acceptance_rate", 0.0),
+            "spec_draft_tokens": prediction["draft_tokens"],
+            "spec_accepted_tokens": prediction["accepted_tokens"],
+            "spec_num_drafts": prediction["num_drafts"],
+            "spec_acceptance_length": prediction["acceptance_length"],
+            "spec_acceptance_rate": prediction["acceptance_rate"],
         }
 
     def update(self, predictions: list[dict]) -> None:

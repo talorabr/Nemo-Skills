@@ -133,7 +133,6 @@ def _get_external_dataset(dataset_name: str, config_name: str = "default"):
     return EXTERNAL_DATASETS[full_name]
 
 
-@staticmethod
 def _generate_stackselect_prompt(question: str, answers: list[str], answer: str, num_tokens: int) -> str:
     random.seed(42)
     encoder = tiktoken.get_encoding("o200k_base")
@@ -213,7 +212,6 @@ An: The reason why you do not choose this answer.
     return prompt
 
 
-@staticmethod
 def _generate_textsort_prompt(prompt: str) -> str:
     # Original prompt as given in Ada-LEval paper: https://arxiv.org/pdf/2404.06480
     original_instruction = "\n    You are an AI assistant. Your job is to sort multiple book sections into the correct order.\n    Each time, you will be provided with 4 pieces of text.\n    These texts form a continuous part of a book, but are provided in random order.\n    You need to find the correct order and return the answer in a string.\n    For example, if you output [4, 1, 3, 2], that means the correct order is: Part 4 -> Part 1 -> Part 3 -> Part 2.\n    You will also be provided with the neighboring paragraphs before and after the 4 pieces of texts. \n\n    The case sample is shown below and you should give me the answer in the format exactly the same as the sample. \n\n    However, you should NOT focus on the content of sample answer. \n\n    Please do NOT output any extra content. \n    Sample Input (format only): \n\n    Before: XXX (Text before the continuous book part)\n\n\n    Part 1: XXX\n\n\n    Part 2: XXX\n\n\n    Part 3: XXX\n\n\n    Part 4: XXX\n\n\n    After: XXX (Text after the continuous book part)\n\n\n    Sample Output (format only): \n\n    Answer: [4, 1, 3, 2] \n\n\n\n"
@@ -269,7 +267,6 @@ YYY
     return prompt.replace(original_instruction, new_instruction, 1)
 
 
-@staticmethod
 def _generate_writing_prompt(contents: list[str]) -> str:
     content = "\n\n".join([f"START CONTENT {i + 1}\n\n{content}\n\nEND CONTENT" for i, content in enumerate(contents)])
     # Inspired by the prompt used in BAMBOO paper: https://arxiv.org/pdf/2309.13345
@@ -286,7 +283,6 @@ The content of the dialogue(s) is given below.
     return prompt
 
 
-@staticmethod
 def _pad_or_truncate_prompt(prompt: str, target_num_tokens: int, padding: str = "Answer now please.\n") -> str:
     encoder = tiktoken.get_encoding("o200k_base")
 
@@ -311,13 +307,11 @@ def _pad_or_truncate_prompt(prompt: str, target_num_tokens: int, padding: str = 
         return prompt
 
 
-@staticmethod
 def _generate_bamboo_prompt(external_dataset: "Dataset", num_tokens: int) -> str:
     prompt = _generate_writing_prompt(external_dataset["content"])
     return _pad_or_truncate_prompt(prompt, num_tokens)
 
 
-@staticmethod
 def _generate_chatrag_bench_prompt(external_dataset: "Dataset") -> str:
     prompt = (
         "Please give a full and complete answer for the questions. \n\nContext:\n{context}\n\nQuestion:\n{question}"
@@ -328,7 +322,6 @@ def _generate_chatrag_bench_prompt(external_dataset: "Dataset") -> str:
     return [prompt.format(context=context, question=questions[0])] + questions[1:]
 
 
-@staticmethod
 def _generate_coser_prompt(external_dataset: "Dataset") -> str:
     rng = np.random.default_rng(seed=12347)
     # Original prompt as given in CoSER paper: https://arxiv.org/pdf/2404.06480
@@ -378,7 +371,6 @@ her fear and anger)."""
     )
 
 
-@staticmethod
 def _generate_mmlu_pro_prompt(external_dataset: "Dataset", subject: str) -> str:
     def get_question_and_options(question, options):
         options = [(chr(ord("A") + i), a) for i, a in enumerate(options)]
@@ -396,7 +388,6 @@ def _generate_mmlu_pro_prompt(external_dataset: "Dataset", subject: str) -> str:
     ]
 
 
-@staticmethod
 def _generate_hle_prompt(
     example: dict[str, Any], hle_train: "pd.DataFrame", num_tokens: int, rng: "np.random.Generator"
 ) -> str:
@@ -420,7 +411,6 @@ def _generate_hle_prompt(
     return encoder.decode(prompt_tokens[: num_tokens - len(example_tokens) + 1] + example_tokens)
 
 
-@staticmethod
 def _get_num_tokens_from_config(speed_config: DATASET_CONFIG | str) -> int:
     match = re.search(r"throughput_(\d+)k", speed_config)
     if match:

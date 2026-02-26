@@ -34,7 +34,7 @@ class SpecdecEvaluatorConfig(BaseEvaluatorConfig):
             the before/after delta from the server's ``/metrics`` endpoint.
     """
 
-    specdec_stats: dict | None = None
+    specdec_stats: dict
 
 
 def eval_specdec(cfg: dict[str, Any]) -> None:
@@ -74,25 +74,18 @@ def eval_specdec(cfg: dict[str, Any]) -> None:
     # 2. Inject pre-computed spec-decode stats into each data point
     # ------------------------------------------------------------------
     stats = eval_config.specdec_stats
-    if stats is not None:
-        LOG.info(
-            "Stamping spec-decode stats onto %d data points: "
-            "acceptance_length=%.4f, acceptance_rate=%.2f%%, num_drafts=%d",
-            len(data),
-            stats.get("acceptance_length", 0.0),
-            stats.get("acceptance_rate", 0.0),
-            stats.get("num_drafts", 0),
-        )
-        for sample in data:
-            for key, value in stats.items():
-                if key not in sample:
-                    sample[key] = value
-    else:
-        LOG.warning(
-            "No speculative decoding stats available. "
-            "This usually means speculative decoding was not enabled on the server. "
-            "Data points will not contain spec-decode metrics."
-        )
+    LOG.info(
+        "Stamping spec-decode stats onto %d data points: "
+        "acceptance_length=%.4f, acceptance_rate=%.2f%%, num_drafts=%d",
+        len(data),
+        stats["acceptance_length"],
+        stats["acceptance_rate"],
+        stats["num_drafts"],
+    )
+    for sample in data:
+        for key, value in stats.items():
+            if key not in sample:
+                sample[key] = value
 
     # ------------------------------------------------------------------
     # 3. Write back

@@ -68,7 +68,7 @@ ns eval \
     --server_args="--speculative-algorithm STANDALONE --speculative-draft-model-path meta-llama/Llama-3.2-1B-Instruct --speculative-num-steps 3 --speculative-eagle-topk 1 --torch-compile-max-bs 32 --max-running-requests 32 --cuda-graph-max-bs 32 --mem-fraction-static 0.8" \
     --server_nodes=1 \
     --server_gpus=8 \
-    --server_type=sglang
+    --server_type=sglang \
     ++inference.tokens_to_generate=1024
 ```
 
@@ -92,6 +92,6 @@ ns eval \
     --server_args="--speculative-config '{\"method\": \"eagle3\", \"num_speculative_tokens\": 3, \"model\": \"nvidia/Llama-3.3-70B-Instruct-Eagle3\"}'" \
     --server_nodes=1 \
     --server_gpus=8 \
-    --server_type=vllm
+    --server_type=vllm \
     ++inference.tokens_to_generate=1024
 ```
